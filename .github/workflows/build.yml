@@ -1,0 +1,40 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: build/Release/NeatRepeat.clap
+            tests: build/Release/neat_repeat_tests.exe
+            extra: ""
+          - os: macos-latest
+            artifact: build/NeatRepeat.clap
+            tests: build/neat_repeat_tests
+            extra: -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
+          - os: ubuntu-latest
+            artifact: build/NeatRepeat.clap
+            tests: build/neat_repeat_tests
+            extra: -DCMAKE_BUILD_TYPE=Release
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        shell: bash
+        run: cmake -S . -B build ${{ matrix.extra }}
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test
+        shell: bash
+        run: ${{ matrix.tests }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NeatRepeat-${{ runner.os }}
+          path: ${{ matrix.artifact }}
