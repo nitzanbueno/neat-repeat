@@ -66,6 +66,8 @@ struct Plugin {
   Looper looper;
   double sampleRate = 44100.0;
   double bpm = kDefaultBpm;
+  bool hostPlaying = true;  // hosts without a transport count as always playing
+  bool appliedPlaying = false;
   int appliedTrigger = 0;
   int64_t appliedLength = 0;
   bool appliedSync = false;
@@ -94,15 +96,17 @@ struct Plugin {
       appliedLength = len;
     }
 
-    // Any change between Off / On 1 / On 2 that lands on an "on" position
-    // starts a fresh loop.
+    // The loop only runs while the transport plays. Any change between
+    // Off / On 1 / On 2, or the transport starting, that leaves Trigger on an
+    // "on" position starts a fresh loop.
     const int trig = triggerFromValue(values[kTrigger].load());
-    if (trig != appliedTrigger) {
-      if (trig == 0)
+    if (trig != appliedTrigger || hostPlaying != appliedPlaying) {
+      if (trig == 0 || !hostPlaying)
         looper.stop();
       else
         looper.trigger();
       appliedTrigger = trig;
+      appliedPlaying = hostPlaying;
     }
   }
 
@@ -113,6 +117,7 @@ struct Plugin {
 
   void updateTransport(const clap_event_transport* t) {
     if ((t->flags & CLAP_TRANSPORT_HAS_TEMPO) && t->tempo > 0.0) bpm = t->tempo;
+    hostPlaying = (t->flags & CLAP_TRANSPORT_IS_PLAYING) != 0;
   }
 
   // Returns true if the event may have changed the loop settings.
@@ -139,7 +144,10 @@ struct Plugin {
     const clap_audio_buffer& out = proc->audio_outputs[0];
     const int channels = static_cast<int>(std::min(in.channel_count, out.channel_count));
 
-    if (proc->transport) updateTransport(proc->transport);
+    if (proc->transport)
+      updateTransport(proc->transport);
+    else
+      hostPlaying = true;
     applyParams();
 
     // Split the block at each event so changes are sample-accurate.
@@ -366,6 +374,8 @@ bool pluginActivate(const clap_plugin* p, double sampleRate, uint32_t, uint32_t)
   plug->sampleRate = sampleRate;
   plug->looper.prepare(kNumChannels, maxLoopSamples(sampleRate));
   plug->appliedTrigger = 0;
+  plug->hostPlaying = true;
+  plug->appliedPlaying = false;
   plug->appliedSync = syncFromValue(plug->values[kSync].load());
   plug->appliedLength = plug->currentLengthSamples();
   plug->looper.setLength(plug->appliedLength);

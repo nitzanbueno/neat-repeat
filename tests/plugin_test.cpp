@@ -48,8 +48,14 @@ const clap_host kHost = {
     [](const clap_host*) {},
 };
 
+union AnyEvent {
+  clap_event_header header;
+  clap_event_param_value param;
+  clap_event_transport transport;
+};
+
 struct EventList {
-  std::vector<clap_event_param_value> events;
+  std::vector<AnyEvent> events;
   clap_input_events list{this,
                          [](const clap_input_events* l) -> uint32_t {
                            return static_cast<uint32_t>(
@@ -63,8 +69,9 @@ struct EventList {
 const clap_output_events kNoOutput = {
     nullptr, [](const clap_output_events*, const clap_event_header*) { return true; }};
 
-clap_event_param_value paramEvent(uint32_t time, clap_id id, double value) {
-  clap_event_param_value ev{};
+AnyEvent paramEvent(uint32_t time, clap_id id, double value) {
+  AnyEvent any{};
+  clap_event_param_value& ev = any.param;
   ev.header.size = sizeof(ev);
   ev.header.time = time;
   ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
@@ -75,7 +82,19 @@ clap_event_param_value paramEvent(uint32_t time, clap_id id, double value) {
   ev.channel = -1;
   ev.key = -1;
   ev.value = value;
-  return ev;
+  return any;
+}
+
+AnyEvent transportEvent(uint32_t time, double tempo, bool playing) {
+  AnyEvent any{};
+  clap_event_transport& ev = any.transport;
+  ev.header.size = sizeof(ev);
+  ev.header.time = time;
+  ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+  ev.header.type = CLAP_EVENT_TRANSPORT;
+  ev.flags = CLAP_TRANSPORT_HAS_TEMPO | (playing ? CLAP_TRANSPORT_IS_PLAYING : 0);
+  ev.tempo = tempo;
+  return any;
 }
 
 struct Harness {
@@ -83,12 +102,15 @@ struct Harness {
   const clap_plugin_params* params = nullptr;
   const clap_plugin_state* state = nullptr;
   double tempo = 120.0;
+  bool playing = true;
+  bool hasTransport = true;
   int64_t now = 0;
   std::vector<float> outL, outR;
 
+  static constexpr clap_id kPlayChange = CLAP_INVALID_ID;
   struct Change {
     int64_t time;
-    clap_id id;
+    clap_id id;  // kPlayChange: value is the new playing state
     double value;
   };
   std::vector<Change> changes;
@@ -115,6 +137,9 @@ struct Harness {
   // Schedules a parameter change at an absolute sample time.
   void set(int64_t time, clap_id id, double value) { changes.push_back({time, id, value}); }
 
+  // Schedules the host transport starting or stopping at an absolute sample time.
+  void setPlaying(int64_t time, bool play) { changes.push_back({time, kPlayChange, play ? 1.0 : 0.0}); }
+
   // Processes audio up to (not including) the absolute sample time `until`,
   // in place, with the input signal L = t, R = -t.
   void run(int64_t until) {
@@ -130,25 +155,27 @@ struct Harness {
       io.data32 = channels;
       io.channel_count = 2;
 
+      // The block's transport reflects the playing state at its first sample;
+      // changes inside the block arrive as transport events.
+      const AnyEvent transport = transportEvent(0, tempo, playing);
       EventList events;
       for (const Change& c : changes) {
-        if (c.time >= now && c.time < now + frames)
-          events.events.push_back(paramEvent(static_cast<uint32_t>(c.time - now), c.id, c.value));
+        if (c.time < now || c.time >= now + frames) continue;
+        const uint32_t offset = static_cast<uint32_t>(c.time - now);
+        if (c.id == kPlayChange) {
+          playing = c.value != 0.0;
+          events.events.push_back(transportEvent(offset, tempo, playing));
+        } else {
+          events.events.push_back(paramEvent(offset, c.id, c.value));
+        }
       }
       std::stable_sort(events.events.begin(), events.events.end(),
                        [](const auto& a, const auto& b) { return a.header.time < b.header.time; });
 
-      clap_event_transport transport{};
-      transport.header.size = sizeof(transport);
-      transport.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
-      transport.header.type = CLAP_EVENT_TRANSPORT;
-      transport.flags = CLAP_TRANSPORT_HAS_TEMPO | CLAP_TRANSPORT_IS_PLAYING;
-      transport.tempo = tempo;
-
       clap_process proc{};
       proc.steady_time = now;
       proc.frames_count = frames;
-      proc.transport = &transport;
+      proc.transport = hasTransport ? &transport.transport : nullptr;
       proc.audio_inputs = &io;
       proc.audio_outputs = &io;
       proc.audio_inputs_count = 1;
@@ -310,6 +337,53 @@ void testGrowAfterLongLoop() {
   h.expect(22000, 30000, [](int64_t t) { return (t - 22000) % 10000; });
 }
 
+// Pausing stops the loop; resuming with Trigger on starts a fresh loop at the
+// first played sample.
+void testPauseAndResume() {
+  Harness h;
+  h.set(0, kLength, normFromMs(100));
+  h.set(1000, kTrigger, 1);
+  h.setPlaying(1250, false);
+  h.setPlaying(1600, true);
+  h.run(2000);
+  h.expect(1000, 1250, [](int64_t t) { return 1000 + (t - 1000) % 100; });
+  h.expect(1250, 1600, [](int64_t t) { return t; });
+  h.expect(1600, 2000, [](int64_t t) { return 1600 + (t - 1600) % 100; });
+}
+
+void testTriggerWhilePaused() {
+  Harness h;
+  h.playing = false;
+  h.set(0, kLength, normFromMs(100));
+  h.set(500, kTrigger, 2);
+  h.setPlaying(1000, true);
+  h.run(1400);
+  h.expect(0, 1000, [](int64_t t) { return t; });
+  h.expect(1000, 1400, [](int64_t t) { return 1000 + (t - 1000) % 100; });
+}
+
+void testTriggerOffWhilePaused() {
+  Harness h;
+  h.set(0, kLength, normFromMs(100));
+  h.set(1000, kTrigger, 1);
+  h.setPlaying(1200, false);
+  h.set(1300, kTrigger, 0);
+  h.setPlaying(1400, true);
+  h.run(1700);
+  h.expect(1000, 1200, [](int64_t t) { return 1000 + (t - 1000) % 100; });
+  h.expect(1200, 1700, [](int64_t t) { return t; });
+}
+
+// Hosts that provide no transport are treated as always playing.
+void testNoTransport() {
+  Harness h;
+  h.hasTransport = false;
+  h.set(0, kLength, normFromMs(100));
+  h.set(1000, kTrigger, 1);
+  h.run(1400);
+  h.expect(1000, 1400, [](int64_t t) { return 1000 + (t - 1000) % 100; });
+}
+
 void testParamText() {
   Harness h;
   CHECK(h.text(kTrigger, 0) == "Off");
@@ -400,6 +474,10 @@ int main() {
       {"sync toggled while looping", testSyncToggleWhileLooping},
       {"10 s max length", testMaxLength},
       {"grow to max after long loop", testGrowAfterLongLoop},
+      {"pause stops, resume restarts", testPauseAndResume},
+      {"trigger on while paused", testTriggerWhilePaused},
+      {"trigger off while paused", testTriggerOffWhilePaused},
+      {"no host transport", testNoTransport},
       {"parameter text", testParamText},
       {"sync division order", testSyncDivisionOrder},
       {"state round trip", testStateRoundTrip},
