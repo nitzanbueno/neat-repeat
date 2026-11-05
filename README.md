@@ -24,3 +24,35 @@ The plugin has three parameters:
 - **Time**: This parameter controls the repeat time. It's either in milliseconds or beats, depending on the sync parameter.
   The range is between 10ms-10s, or between 1/64th and 1 bar (with dotted and triplet times included in the middle).
 - **Sync**: This parameter controls whether the time parameter is synced to the BPM or not.
+
+_This part of the readme is AI-generated._
+
+## Building
+
+You need CMake 3.20+, a C++17 compiler and git (CMake downloads the CLAP headers).
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+```
+
+```bash
+cmake --build build --config Release
+```
+
+Output:
+
+- **Windows:** `build/Release/NeatRepeat.clap`, copy to `C:\Program Files\Common Files\CLAP\`
+- **macOS:** `build/NeatRepeat.clap` (bundle), copy to `~/Library/Audio/Plug-Ins/CLAP/`. For a universal binary add `-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"` when configuring.
+- **Linux:** `build/NeatRepeat.clap`, copy to `~/.clap/`
+
+The GitHub Actions workflow in `.github/workflows/build.yml` builds and tests on all three
+platforms and uploads the plugins as build artifacts.
+
+## Tests
+
+`neat_repeat_tests` drives the plugin through its CLAP entry point at 1000 Hz with the sample
+index as input, checking each looping rule sample by sample.
+
+```bash
+ctest --test-dir build -C Release --output-on-failure
+```
